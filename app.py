@@ -7,21 +7,16 @@ import time
 import streamlit as st
 from tensorflow.keras.models import load_model
 from tensorflow.keras.preprocessing.image import img_to_array
-from pytube import Search
+from youtubesearchpython import VideosSearch
 
-
+# -------------------- Load Model & Setup --------------------
 def load_emotion_model(model_path="emotion_model.h5"):
     return load_model(model_path)
 
-
-# Load the pre-trained emotion model
 model = load_emotion_model()
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-
-# Define emotion labels
 emotion_labels = ['Angry', 'Disgust', 'Fear', 'Happy', 'Neutral', 'Sad', 'Surprise']
 
-# Mapping emotions to music genres
 emotion_music_mapping = {
     "Happy": ["party music", "dance hits"],
     "Sad": ["sad songs", "soft piano"],
@@ -32,75 +27,155 @@ emotion_music_mapping = {
     "Disgust": ["instrumental", "classical music"]
 }
 
-# History tracking file
+uplifting_content_mapping = {
+    "Sad": ["sad songs", "funny videos"],
+    "Angry": ["calm music", "meditation videos"],
+    "Fear": ["motivational songs", "inspirational talks"],
+    "Disgust": ["chill beats", "stand-up comedy"]
+}
+
 history_file = "music_history.json"
 
-
-def save_history(emotion, video_url):
+# -------------------- Utility Functions --------------------
+def save_history(emotion, recommendations):
     try:
         with open(history_file, "r") as file:
             history = json.load(file)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except:
         history = []
-
-    history.append({"emotion": emotion, "video_url": video_url})
-
+    history.append({"emotion": emotion, "recommendations": recommendations})
     with open(history_file, "w") as file:
         json.dump(history, file, indent=4)
 
+def load_history():
+    try:
+        with open(history_file, "r") as file:
+            return json.load(file)
+    except:
+        return []
 
-def get_music_recommendation(emotion):
-    queries = emotion_music_mapping.get(emotion, ["popular songs"])
-    for query in queries:
-        search_results = Search(query).results
-        if search_results:
-            video_url = search_results[0].watch_url
-            save_history(emotion, video_url)
-            return video_url
-    return None
-
+def get_recommendations(query, limit=3):
+    try:
+        search = VideosSearch(query, limit=limit).result()
+        return [{"title": v["title"], "url": v["link"]} for v in search['result']]
+    except:
+        return []
 
 def detect_emotion():
     cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        st.error("Error: Could not open webcam.")
-        return None
+    detected_emotion = ""
+    stframe = st.empty()
 
-    ret, frame = cap.read()
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+
+        for (x, y, w, h) in faces:
+            roi = gray[y:y+h, x:x+w]
+            roi = cv2.resize(roi, (48, 48))
+            roi = img_to_array(roi.astype("float") / 255.0)
+            roi = np.expand_dims(roi, axis=0)
+            preds = model.predict(roi, verbose=0)[0]
+            detected_emotion = emotion_labels[np.argmax(preds)]
+            cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+            cv2.putText(frame, detected_emotion, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0,255,0), 2)
+
+        stframe.image(frame, channels="BGR")
+        time.sleep(0.5)
+        if detected_emotion:
+            break
+
     cap.release()
-    if not ret:
-        st.error("Error: Could not capture frame.")
-        return None
+    return detected_emotion
 
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.3, minNeighbors=5)
+# -------------------- Streamlit UI --------------------
+st.set_page_config(page_title="🎵 Emotion Music", layout="wide")
 
-    if len(faces) == 0:
-        st.warning("No face detected. Try again.")
-        return None
+# Custom CSS for background and UI
+st.markdown("""
+    <style>
+        body {
+            background: linear-gradient(to right, #360033, #0b8793);
+        }
+        .main {
+            background: linear-gradient(to right, #360033, #0b8793);
+            color: white;
+        }
+        footer {
+            visibility: hidden;
+        }
+        .footer-style {
+            position: fixed;
+            left: 0;
+            bottom: 0;
+            width: 100%;
+            text-align: center;
+            padding: 10px;
+            font-size: 14px;
+            background-color: rgba(0, 0, 0, 0.4);
+            color: white;
+        }
+    </style>
+""", unsafe_allow_html=True)
 
-    x, y, w, h = faces[0]
-    roi = gray[y:y + h, x:x + w]
-    roi = cv2.resize(roi, (48, 48))
-    roi = roi.astype("float") / 255.0
-    roi = img_to_array(roi)
-    roi = np.expand_dims(roi, axis=0)
+# -------------------- Top Navigation --------------------
+page = st.selectbox("Navigate", ["🏠 Home", "📜 History"])
 
-    preds = model.predict(roi)[0]
-    emotion = emotion_labels[np.argmax(preds)]
-    return emotion
+# -------------------- Main UI --------------------
+st.markdown("""
+    <div style='text-align: center;'>
+        <h1 style='font-size: 42px;'>🎵 Real-Time Emotion-Based Music Recommendation</h1>
+        <p style='font-size: 20px;'>Detect your emotion and enjoy music tailored to your mood</p>
+    </div>
+""", unsafe_allow_html=True)
 
+if page == "🏠 Home":
+    mode = st.radio("Select Emotion Detection Mode", ["🎭 Detect Emotion via Webcam", "📷 Manually Select Emotion"])
+    query = None
 
-# Streamlit UI
-st.title("Real-Time Emotion-Based Music Recommendation")
-st.write("Click the button below to detect your emotion and get a music recommendation.")
+    if mode == "🎭 Detect Emotion via Webcam":
+        if st.button("🎭 Detect Emotion"):
+            query = detect_emotion()
+    else:
+        query = st.selectbox("📌 Select Emotion Manually", emotion_labels)
+        if st.button("🎶 Get Music For This Emotion"):
+            st.success(f"🎭 Selected Emotion: {query}")
 
-if st.button("Detect Emotion"):
-    emotion = detect_emotion()
-    if emotion:
-        st.success(f"Detected Emotion: {emotion}")
-        video_url = get_music_recommendation(emotion)
-        if video_url:
-            st.write(f"Recommended Music: [Click Here]({video_url})")
+    if query:
+        if query in uplifting_content_mapping:
+            option = st.radio("What would you prefer?", ["🎵 Same Mood Music", "🌞 Uplifting Content"])
+            search_term = uplifting_content_mapping[query][0] if option.startswith("🎵") else uplifting_content_mapping[query][1]
         else:
-            st.warning("No music recommendation found.")
+            search_term = query
+
+        recommendations = get_recommendations(search_term)
+        save_history(query, recommendations)
+
+        if recommendations:
+            st.markdown("### 🎧 Recommendations:")
+            for rec in recommendations:
+                st.markdown(f"🔗 [{rec['title']}]({rec['url']})")
+        else:
+            st.warning("No recommendations found.")
+
+elif page == "📜 History":
+    st.subheader("📜 Recommendation History")
+    history = load_history()
+    if history:
+        for entry in reversed(history):
+            st.markdown(f"**🎭 Emotion/Query:** {entry['emotion']}")
+            for rec in entry.get("recommendations", []):
+                st.markdown(f"🔗 [{rec['title']}]({rec['url']})")
+            st.markdown("---")
+    else:
+        st.info("No history found.")
+
+# -------------------- Footer --------------------
+st.markdown("""
+<div class='footer-style'>
+    Made with love ❤️
+</div>
+""", unsafe_allow_html=True)
